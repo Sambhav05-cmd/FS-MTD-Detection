@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -20,6 +21,7 @@ var logPath = "../logs/logfile%d.csv"
 var evaluateMTD = true // If true, creates new csv file every time period (2s, 5s, 10s). Otherwise, dumps all records into one csv for training purposes
 var initialTimestamp = time.Now().Unix()
 var timeWindow = 5
+var benchmarkDirectIO bool
 
 type RenameNode struct {
 	fs.LoopbackNode
@@ -185,7 +187,11 @@ func (n *RenameNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, 
 	}
 	lf := NewLoopbackFile(f, n.Name, &n.LoopbackNode)
 
-	return lf, 0, 0
+	fuseFlags = uint32(0)
+	if benchmarkDirectIO {
+		fuseFlags = fuse.FOPEN_DIRECT_IO
+	}
+	return lf, fuseFlags, 0
 }
 
 func (n *RenameNode) path() string {
@@ -194,11 +200,18 @@ func (n *RenameNode) path() string {
 }
 
 func main() {
+	mountPoint := flag.String("mount", "/home/USERNAME_HERE/FTP/", "FUSE mountpoint")
+	backing := flag.String("backing", "../filesystem_dir", "backing directory")
+	logPattern := flag.String("log-pattern", logPath, "CSV filename pattern containing %d")
+	allowOther := flag.Bool("allow-other", true, "allow access by other users")
+	directIO := flag.Bool("direct-io", false, "bypass FUSE page cache for benchmark reads")
+	flag.Parse()
+	benchmarkDirectIO = *directIO
+	logPath = *logPattern
 	go changeLogFile()
-	mountPoint := "/home/USERNAME_HERE/FTP/" // Change the path to the desired mountpoint
 	rootData := &fs.LoopbackRoot{
 		NewNode: newRenameNode,
-		Path:    "../filesystem_dir",
+		Path:    *backing,
 	}
 
 	sec := time.Second
@@ -207,11 +220,14 @@ func main() {
 		EntryTimeout: &sec,
 	}
 
-	opts.MountOptions.Options = append(opts.MountOptions.Options, "allow_other", "fsname=renameFS")
+	opts.MountOptions.Options = append(opts.MountOptions.Options, "fsname=renameFS")
+	if *allowOther {
+		opts.MountOptions.Options = append(opts.MountOptions.Options, "allow_other")
+	}
 	opts.MountOptions.Name = "renameFS"
 	opts.NullPermissions = true
 
-	server, err := fs.Mount(mountPoint, newRenameNode(rootData, nil, "root", nil), opts)
+	server, err := fs.Mount(*mountPoint, newRenameNode(rootData, nil, "root", nil), opts)
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
